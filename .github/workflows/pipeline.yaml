@@ -1,0 +1,87 @@
+name: Pipeline
+on:
+  push:
+    branches: [ master ]
+env:
+  IMAGE_NAME: boilerplate
+  DEPLOYMENT_NAME: boilerplate
+  REGISTRY_HOSTNAME: gcr.io
+  GOOGLE_CREDENTIALS: ${{ secrets.GOOGLE_CREDENTIALS }}
+  PROJECT_ID: ${{ secrets.GOOGLE_PROJECT_ID }}
+  GKE_CLUSTER: cluster-1
+  GKE_ZONE: us-central1-c
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: 1.18
+
+      - name: test
+        run: go test -count=1 .
+
+  build:
+    needs:
+      - test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: 1.18
+
+      - name: build
+        run: go build -o boilerplate
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: build
+          path: boilerplate
+
+  deploy:
+    needs:
+      - build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: build
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v0
+        with:
+          credentials_json: ${{ secrets.GOOGLE_CREDENTIALS }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v0
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker --quiet
+
+      - name: Build
+        run: |
+          export TAG=$(git rev-parse --short "$GITHUB_SHA")
+          docker build -t $REGISTRY_HOSTNAME/$PROJECT_ID/$IMAGE_NAME:$TAG .
+
+      - name: Publish
+        run: |
+          export TAG=$(git rev-parse --short "$GITHUB_SHA")
+          docker push $REGISTRY_HOSTNAME/$PROJECT_ID/$IMAGE_NAME:$TAG
+          docker tag $REGISTRY_HOSTNAME/$PROJECT_ID/$IMAGE_NAME:$TAG $REGISTRY_HOSTNAME/$PROJECT_ID/$IMAGE_NAME:latest
+          docker push $REGISTRY_HOSTNAME/$PROJECT_ID/$IMAGE_NAME:latest
+
+      - run: gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE"
+
+      - name: Deploy
+        run: |
+          kubectl apply -f deployment.yaml
+          kubectl rollout restart deployment/$DEPLOYMENT_NAME
